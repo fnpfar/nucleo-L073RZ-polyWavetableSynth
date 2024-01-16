@@ -36,8 +36,11 @@
 
 #define DAC_BUFFER_SIZE 512 // size in samples of the DMA DAC buffer (two halves)
 #define SINE_TABLE_SIZE 4096 // size in samples of the sine wave table (1 period)
+#define SINE_TABLE_AMPLITUDE 0.8 // amplitude of the precomputed sine wave. max = 1
+#define DAC_MAX_VALUE 4095
 #define UART_BUFFER_SIZE 100
 #define USER_BUTTON_STEPS 1000 // number of times USER button is pressed until button_counter reset
+
 
 /* USER CODE END PD */
 
@@ -53,6 +56,7 @@ DMA_HandleTypeDef hdma_adc;
 DAC_HandleTypeDef hdac;
 DMA_HandleTypeDef hdma_dac_ch1;
 
+TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart2;
@@ -73,6 +77,7 @@ static void MX_USART2_UART_Init(void);
 static void MX_DAC_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_ADC_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -116,6 +121,7 @@ int main(void)
   MX_DAC_Init();
   MX_TIM6_Init();
   MX_ADC_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
 	// Initial message
@@ -127,15 +133,18 @@ int main(void)
 	// Sine wave generation and storage in memory
 	uint16_t sine_wave_table[SINE_TABLE_SIZE];
 	for (int n = 0; n < SINE_TABLE_SIZE; n++) { // generates a 12-bit sine wave, 1 period
-		double sinn = sin((2 * M_PI * n) / SINE_TABLE_SIZE);
-		sine_wave_table[n] = (uint16_t) ((sinn + 1.15) * (3080 / 2)); // amplitude & offset adjust
+		double sinn = SINE_TABLE_AMPLITUDE * sin((2 * M_PI * n) / SINE_TABLE_SIZE);
+		sine_wave_table[n] = (uint16_t) (((DAC_MAX_VALUE-1)/2) * sinn + ((DAC_MAX_VALUE-1)/2)); // adapt to DAC range
 	}
 	strcpy((char*) uart_buf,
 			"A sinusoidal wave has been stored in memory.\r\n");
 	HAL_UART_Transmit(&huart2, uart_buf, strlen((char*) uart_buf),
 	HAL_MAX_DELAY);
 
-	// Timer 6 start
+	// Timer 3 start (for encoder)
+	HAL_TIM_Encoder_Start_IT(&htim3, TIM_CHANNEL_ALL);
+
+	// Timer 6 start (for DAC)
 	HAL_TIM_Base_Start(&htim6); // starts timer 6
 	//HAL_TIM_Base_Start_IT(&htim6) // with interrupts
 
@@ -155,29 +164,41 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-	uint16_t n_0 = 0; // initial phase offset of the sine wave table per half buffer
+	uint16_t sine1 = 0; // sinusoidals one sample buffer
+	uint16_t sine2 = 0;
+	uint16_t n_0_sine1 = 0; // initial phase offset of the sine wave table per half buffer
+	uint16_t n_0_sine2 = 0;
+	uint16_t sine1_freq = 0; // frequency scalers for both tones
+	uint16_t sine2_freq = 0;
+
 	while (1) {
 
-		button_counter = (uint16_t)(value_adc >> 3);
+		sine1_freq = (uint16_t)(value_adc >> 4); // sample ADC to obtain sine wave 1  frequency
+		sine2_freq = TIM3->CNT; // sample rotary encoder counter to obtain sine wave 2  frequency
 
 		if (flag_first_DAC_half_buffer == 1) { // first half buffer transfer complete
 			flag_first_DAC_half_buffer = 0; // resets flag
 
 			for (int n = 0; n < DAC_BUFFER_SIZE / 2; n++) { // update first half buffer samples
 				//dac_dma_buffer[n] = (uint16_t) (dac_dma_buffer[n] * 0.96); // amplitude decay
-				dac_dma_buffer[n] = sine_wave_table[(button_counter * n + n_0) % SINE_TABLE_SIZE];
+				sine1 = sine_wave_table[(sine1_freq * n + n_0_sine1) % SINE_TABLE_SIZE];
+				sine2 = sine_wave_table[(sine2_freq * n + n_0_sine2) % SINE_TABLE_SIZE];
+				dac_dma_buffer[n] = (sine1 + sine2) >> 1; // mix both sines & scale
 			}
-			n_0 = (button_counter * (DAC_BUFFER_SIZE / 2) + n_0) % SINE_TABLE_SIZE; // updates next sample to read
-
+			n_0_sine1 = (sine1_freq * (DAC_BUFFER_SIZE / 2) + n_0_sine1) % SINE_TABLE_SIZE; // updates next sample to read
+			n_0_sine2 = (sine2_freq * (DAC_BUFFER_SIZE / 2) + n_0_sine2) % SINE_TABLE_SIZE;
 		}
 		if (flag_second_DAC_half_buffer == 1) { // second half buffer transfer complete
 			flag_second_DAC_half_buffer = 0;  // resets flag
 
 			for (int n = 0; n < DAC_BUFFER_SIZE / 2; n++) { // update second half buffer samples
 				//dac_dma_buffer[n] = (uint16_t) (dac_dma_buffer[n] * 0.96); // amplitude decay
-				dac_dma_buffer[n + DAC_BUFFER_SIZE / 2] = sine_wave_table[(button_counter * n + n_0) % SINE_TABLE_SIZE];
+				sine1 = sine_wave_table[(sine1_freq * n + n_0_sine1) % SINE_TABLE_SIZE];
+				sine2 = sine_wave_table[(sine2_freq * n + n_0_sine2) % SINE_TABLE_SIZE];
+				dac_dma_buffer[n + DAC_BUFFER_SIZE / 2] = (sine1 + sine2) >> 1; // mix both sines & scale
 			}
-			n_0 = (button_counter * (DAC_BUFFER_SIZE / 2) + n_0) % SINE_TABLE_SIZE;
+			n_0_sine1 = (sine1_freq * (DAC_BUFFER_SIZE / 2) + n_0_sine1) % SINE_TABLE_SIZE;
+			n_0_sine2 = (sine2_freq * (DAC_BUFFER_SIZE / 2) + n_0_sine2) % SINE_TABLE_SIZE;
 		}
 
     /* USER CODE END WHILE */
@@ -330,6 +351,59 @@ static void MX_DAC_Init(void)
   /* USER CODE BEGIN DAC_Init 2 */
 
   /* USER CODE END DAC_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_Encoder_InitTypeDef sConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 0;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 65535;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 0;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 0;
+  if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIMEx_RemapConfig(&htim3, TIM3_TI1_GPIO) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
 
 }
 
