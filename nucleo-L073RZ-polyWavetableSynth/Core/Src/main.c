@@ -24,6 +24,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+
+#include "wavetable.h" // holds a wave table: uint16_t flash_table, stored in flash
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -34,8 +36,10 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+
+// Note: Max RAM: 20KB, Max flash: 192KB
 #define DAC_BUFFER_SIZE 512 // size in samples of the DMA DAC buffer (two halves)
-#define SINE_TABLE_SIZE 4096 // size in samples of the sine wave table (1 period)
+#define SINE_TABLE_SIZE 8192 // size in samples of the sine wave table (1 period)
 #define SINE_TABLE_AMPLITUDE 0.8 // amplitude of the precomputed sine wave. max = 1
 #define DAC_MAX_VALUE 4095
 #define UART_BUFFER_SIZE 100
@@ -67,6 +71,10 @@ uint16_t button_counter = 0; // cyclic counter for user button edges
 uint8_t flag_first_DAC_half_buffer = 0; // flags for the DAC half buffers
 uint8_t flag_second_DAC_half_buffer = 0;
 
+uint16_t sine_wave_table[SINE_TABLE_SIZE];
+uint16_t dac_dma_buffer[DAC_BUFFER_SIZE];
+uint8_t uart_buf[UART_BUFFER_SIZE];
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -94,7 +102,6 @@ static void MX_TIM3_Init(void);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-	uint8_t uart_buf[UART_BUFFER_SIZE];
 
   /* USER CODE END 1 */
 
@@ -131,7 +138,6 @@ int main(void)
 	HAL_MAX_DELAY);
 
 	// Sine wave generation and storage in memory
-	uint16_t sine_wave_table[SINE_TABLE_SIZE];
 	for (int n = 0; n < SINE_TABLE_SIZE; n++) { // generates a 12-bit sine wave, 1 period
 		double sinn = SINE_TABLE_AMPLITUDE * sin((2 * M_PI * n) / SINE_TABLE_SIZE);
 		sine_wave_table[n] = (uint16_t) (((DAC_MAX_VALUE-1)/2) * sinn + ((DAC_MAX_VALUE-1)/2)); // adapt to DAC range
@@ -150,7 +156,6 @@ int main(void)
 
 	// DAC DMA start
 	//HAL_DAC_Start(&hdac, DAC_CHANNEL_1); // start DAC
-	uint16_t dac_dma_buffer[DAC_BUFFER_SIZE];
 	HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*) dac_dma_buffer,
 	DAC_BUFFER_SIZE, DAC_ALIGN_12B_R);
 
@@ -173,7 +178,7 @@ int main(void)
 
 	while (1) {
 
-		sine1_freq = (uint16_t)(value_adc >> 4); // sample ADC to obtain sine wave 1  frequency
+		sine1_freq = (uint16_t)(value_adc >> 3); // sample ADC to obtain sine wave 1  frequency
 		sine2_freq = TIM3->CNT; // sample rotary encoder counter to obtain sine wave 2  frequency
 
 		if (flag_first_DAC_half_buffer == 1) { // first half buffer transfer complete
